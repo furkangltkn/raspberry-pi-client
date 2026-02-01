@@ -46,7 +46,7 @@ EMERGENCY_PIN = config.getint('gpio', 'emergency_pin')
 LIFESIGN_PIN = config.getint('gpio', 'lifesign_pin')
 
 # Serial Configuration
-SERIAL_BAUDRATE = config.getint('serial', 'baudrate', fallback=9600)
+SERIAL_BAUDRATES = {k: config.getint('serial_baudrate', k, fallback=9600) for k in config['serial_baudrate']} # Device ID focused baud rate
 SERIAL_TIMEOUT = config.getint('serial', 'timeout', fallback=1)
 TCP_RECV_BUFFER = config.getint('timings', 'tcp_recv_buffer_size', fallback=1024)
 LIFESIGN_INTERVAL = config.getint('timings', 'lifesign_interval', fallback=1)
@@ -67,13 +67,15 @@ is_emergency = False
 is_autonomous = False
 is_connected = False
 gpio_lock = threading.Lock()
+last_ping_time = time.time()
 
 # LIFE SIGN THREAD
 def life_sign_thread():
-    global is_connected
+    global last_ping_time
     while True:
+        now = time.time()
         with gpio_lock:
-            if is_connected:
+            if now - last_ping_time < PING_TIMEOUT:
                 GPIO.output(LIFESIGN_PIN, GPIO.HIGH)            
             else:
                 GPIO.output(LIFESIGN_PIN, GPIO.LOW)
@@ -270,6 +272,10 @@ def command_listener():
         try:
             # Read the command from the socket (Komutu soketten oku)
             data = client.recv(1024)
+
+            if data.strip() == b'PING':
+                last_ping_time = time.time()
+                continue
             if not data:
                 with tcp_lock:
                     try:
@@ -327,9 +333,10 @@ def serial_reader(port):
     while True:
         if devices[device_id] is None:
             try:
-                ser = serial.Serial(serial_nodes[device_id]['port'], SERIAL_BAUDRATE, timeout=SERIAL_TIMEOUT)
+                baudrate = SERIAL_BAUDRATES[device_id]
+                ser = serial.Serial(serial_nodes[device_id]['port'], baudrate, timeout=SERIAL_TIMEOUT)
                 devices[device_id] = ser
-                logger.info(f"Connected to {serial_nodes[device_id]['type']} on {serial_nodes[device_id]['port']}")
+                logger.info(f"Connected to {serial_nodes[device_id]['type']} on {serial_nodes[device_id]['port']} at {baudrate} baud")
             except serial.SerialException as e:
                 logger.warning(f"Failed to connect to {serial_nodes[device_id]['type']}: {e}")
                 time.sleep(2)
@@ -386,6 +393,7 @@ if __name__ == "__main__":
     # Arka plan iş parçacıklarını başlat
     threading.Thread(target=tcp_reconnect, daemon=True).start()
     threading.Thread(target=command_listener, daemon=True).start()
+    threading.Thread(target=life_sign_thread, daemon=True).start()
     threading.Thread(target=life_sign_thread, daemon=True).start()
 
     # Seri port okuyucuları başlat
