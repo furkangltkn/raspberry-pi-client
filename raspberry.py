@@ -50,6 +50,7 @@ SERIAL_BAUDRATES = {k: config.getint('serial_baudrate', k, fallback=9600) for k 
 SERIAL_TIMEOUT = config.getint('serial', 'timeout', fallback=1)
 TCP_RECV_BUFFER = config.getint('timings', 'tcp_recv_buffer_size', fallback=1024)
 LIFESIGN_INTERVAL = config.getint('timings', 'lifesign_interval', fallback=1)
+PING_TIMEOUT = config.getint('timings', 'ping_timeout', fallback=5)
 TCP_RECONNECT_INTERVAL = config.getint('timings', 'tcp_reconnect_interval', fallback=5)
 
 # Setup GPIO
@@ -67,7 +68,7 @@ is_emergency = False
 is_autonomous = False
 is_connected = False
 gpio_lock = threading.Lock()
-last_ping_time = time.time()
+last_ping_time = 0
 
 # LIFE SIGN THREAD
 def life_sign_thread():
@@ -76,10 +77,10 @@ def life_sign_thread():
         now = time.time()
         with gpio_lock:
             if now - last_ping_time < PING_TIMEOUT:
-                GPIO.output(LIFESIGN_PIN, GPIO.HIGH)            
+                GPIO.output(LIFESIGN_PIN, GPIO.HIGH)
             else:
                 GPIO.output(LIFESIGN_PIN, GPIO.LOW)
-        time.sleep(1)
+        time.sleep(LIFESIGN_INTERVAL)
 
 # GPIO CONTROL FUNCTION
 def reset_all_pins():
@@ -263,7 +264,7 @@ def tcp_reconnect():
 
 # Listening to commands 
 def command_listener():
-    global client, is_connected
+    global client, is_connected, last_ping_time
     buffer = b""
     while True:
         if client is None:
@@ -272,10 +273,8 @@ def command_listener():
         try:
             # Read the command from the socket (Komutu soketten oku)
             data = client.recv(1024)
-
-            if data.strip() == b'PING':
-                last_ping_time = time.time()
-                continue
+            
+            # Append received bytes to buffer; PING is handled when a full line arrives
             if not data:
                 with tcp_lock:
                     try:
@@ -296,6 +295,11 @@ def command_listener():
                     continue
 
                 print(f" CMD: {line}")
+
+                # Handle simple PING lines which indicate liveness
+                if line == b'PING':
+                    last_ping_time = time.time()
+                    continue
 
                 if line.startswith(b'CMD|'):
                     try:
@@ -384,7 +388,7 @@ if __name__ == "__main__":
         logger.warning("Update config.ini before deployment")
     
     logger.info(f"Server: {SERVER_IP}:{SERVER_PORT}")
-    logger.info(f"Serial baudrate: {SERIAL_BAUDRATE}")
+    logger.info(f"Serial baudrates: {SERIAL_BAUDRATES}")
     logger.info(f"GPIO pins - Forward: {FORWARD_PIN}, Backward: {BACKWARD_PIN}, Brake: {BRAKE_PIN}")
     
     # TCP bağlantısını başlat
@@ -393,7 +397,6 @@ if __name__ == "__main__":
     # Arka plan iş parçacıklarını başlat
     threading.Thread(target=tcp_reconnect, daemon=True).start()
     threading.Thread(target=command_listener, daemon=True).start()
-    threading.Thread(target=life_sign_thread, daemon=True).start()
     threading.Thread(target=life_sign_thread, daemon=True).start()
 
     # Seri port okuyucuları başlat
