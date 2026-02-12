@@ -99,6 +99,13 @@ def reset_all_pins():
 def run_forward():
     global is_brake
     with gpio_lock:
+        if is_emergency:
+            logger.warning("Cannot run forward while Emergency Stop is ON")
+            return
+        if is_brake:
+            logger.warning("Cannot run forward while Brake is ON")
+            return
+        
         GPIO.output(FORWARD_PIN, GPIO.HIGH)
         GPIO.output(BACKWARD_PIN, GPIO.LOW)
         GPIO.output(BRAKE_PIN, GPIO.LOW)
@@ -108,6 +115,13 @@ def run_forward():
 def run_backward():
     global is_brake
     with gpio_lock:
+        if is_emergency:
+            logger.warning("Cannot run backward while Emergency Stop is ON")
+            return
+        if is_brake:
+            logger.warning("Cannot run backward while Brake is ON")
+            return
+            
         GPIO.output(FORWARD_PIN, GPIO.LOW)
         GPIO.output(BACKWARD_PIN, GPIO.HIGH)
         GPIO.output(BRAKE_PIN, GPIO.LOW)
@@ -115,9 +129,15 @@ def run_backward():
     logger.debug("Running Backward")
 
 def toggle_brake():
-    global is_brake
+    global is_brake, is_autonomous
     with gpio_lock:
         if not is_brake:
+            # Fren yapılırsa otonom mod kapatılır (kontrol manuel önceliklendirilir)
+            if is_autonomous:
+                GPIO.output(AUTONOMOUS_PIN, GPIO.LOW)
+                is_autonomous = False
+                logger.info("Autonomous Mode OFF due to Brake ON")
+
             GPIO.output(BRAKE_PIN, GPIO.HIGH)
             GPIO.output(FORWARD_PIN, GPIO.LOW)
             GPIO.output(BACKWARD_PIN, GPIO.LOW)
@@ -131,11 +151,19 @@ def toggle_brake():
             logger.info("Brake OFF")
 
 def toggle_emergency():
-    global is_emergency
+    global is_emergency, is_brake
     with gpio_lock:
         if not is_emergency:
             GPIO.output(EMERGENCY_PIN, GPIO.HIGH)
+
+            # Motorları durdur
+            GPIO.output(FORWARD_PIN, GPIO.LOW)
+            GPIO.output(BACKWARD_PIN, GPIO.LOW)
+
+            # Freni aç (acil durumlarda fren yap)
+            GPIO.output(BRAKE_PIN, GPIO.HIGH)
             is_emergency = True
+            is_brake = True
             logger.warning("Emergency Stop ON")
         else:
             GPIO.output(EMERGENCY_PIN, GPIO.LOW)
@@ -143,18 +171,31 @@ def toggle_emergency():
             logger.info("Emergency Stop OFF")
 
 def autonomous_on():
-    global is_autonomous
+    global is_autonomous, is_brake
     with gpio_lock:
+        if is_emergency:
+            logger.warning("Cannot enable Autonomous Mode while Emergency Stop is ON")
+            return
+        # Freni bırak
+        GPIO.output(BRAKE_PIN, GPIO.LOW)  
+        is_brake = False 
+        # Otonom modu aç
         GPIO.output(AUTONOMOUS_PIN, GPIO.HIGH)
         is_autonomous = True
+        
         logger.info("Autonomous Mode ON")
 
 def autonomous_off():
     global is_autonomous
     with gpio_lock:
         GPIO.output(AUTONOMOUS_PIN, GPIO.LOW)
+
+        # Motorları durdur
+        GPIO.output(FORWARD_PIN, GPIO.LOW)
+        GPIO.output(BACKWARD_PIN, GPIO.LOW)
+
         is_autonomous = False
-        logger.info("Autonomous Mode OFF")
+        logger.info("Autonomous Mode OFF, motor stopped")
 
 # Port numbers of devices
 ARDUINO = "arduino"
