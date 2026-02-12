@@ -350,7 +350,7 @@ def serial_reader(port):
                 time.sleep(2)
                 continue
         try:
-            line = devices[device_id].readline().decode().strip()
+            line = devices[device_id].readline().decode(errors='ignore').strip()
             if line:
                 # Backend formatı: CihazID|Veri\n
                 msg = f"{device_id}|{line}\n"
