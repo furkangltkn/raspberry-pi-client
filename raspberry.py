@@ -233,6 +233,7 @@ def tcp_connected():
             client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             client.settimeout(5)  # Add timeout
             client.connect((SERVER_IP, SERVER_PORT))
+            client.settimeout(1.0)  # Remove timeout after connection
             is_connected = True
             logger.info(f"Connected to server at {SERVER_IP}:{SERVER_PORT}")
             return True
@@ -272,8 +273,10 @@ def tcp_send_data(data):
                 return True
             except (BrokenPipeError, ConnectionResetError) as e:
                 logger.warning(f"Connection lost while sending: {e}")
+                is_connected = False
             except OSError as e:
                 logger.error(f"Failed to send data: {e}")
+                is_connected = False
             except Exception as e:
                 logger.error(f"Unexpected error sending data: {e}")
             finally:
@@ -309,11 +312,15 @@ def command_listener():
     buffer = b""
     while True:
         if client is None:
+            last_ping_time = 0
             time.sleep(1)
             continue
         try:
             # Read the command from the socket (Komutu soketten oku)
-            data = client.recv(1024)
+            try:
+                data = client.recv(1024)
+            except socket.timeout:
+                continue    
             
             # Append received bytes to buffer; PING is handled when a full line arrives
             if not data:
@@ -324,8 +331,9 @@ def command_listener():
                         pass
                     client = None
                     is_connected = False
+                    last_ping_time = 0
                 continue
-            
+
             buffer += data
 
             # Process the buffer until a line arrives (Bir satır gelene kadar tamponu işle)
@@ -340,6 +348,10 @@ def command_listener():
                 # Handle simple PING lines which indicate liveness
                 if line == b'PING':
                     last_ping_time = time.time()
+                    try:
+                        client.sendall(b'PONG\n')
+                    except:
+                        pass
                     continue
 
                 if line.startswith(b'CMD|'):
@@ -369,6 +381,7 @@ def command_listener():
                     pass
                 client = None
                 is_connected = False
+                last_ping_time = 0
             time.sleep(1)
 
 # Reading data from serial devices
