@@ -156,6 +156,12 @@ def toggle_emergency():
         if not is_emergency:
             GPIO.output(EMERGENCY_PIN, GPIO.HIGH)
 
+            # Acil durum moduna geçildiğinde otonom modu kapat
+            if is_autonomous:
+                GPIO.output(AUTONOMOUS_PIN, GPIO.LOW)
+                is_autonomous = False
+                logger.info("Autonomous Mode OFF due to Emergency Stop ON")
+
             # Motorları durdur
             GPIO.output(FORWARD_PIN, GPIO.LOW)
             GPIO.output(BACKWARD_PIN, GPIO.LOW)
