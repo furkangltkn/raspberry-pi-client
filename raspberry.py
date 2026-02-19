@@ -72,15 +72,29 @@ last_ping_time = 0
 
 # LIFE SIGN THREAD
 def life_sign_thread():
-    global last_ping_time
+    global last_ping_time, is_connected
+
     while True:
         now = time.time()
+        
+        backend_alive = (now - last_ping_time) < PING_TIMEOUT
+        internet_alive = has_internet()
+
         with gpio_lock:
-            if now - last_ping_time < PING_TIMEOUT:
+            if backend_alive and internet_alive:
                 GPIO.output(LIFESIGN_PIN, GPIO.HIGH)
             else:
                 GPIO.output(LIFESIGN_PIN, GPIO.LOW)
+        
         time.sleep(LIFESIGN_INTERVAL)
+
+# Internet connection check
+def has_internet():
+    try:
+        socket.create_connection(("8.8.8.8", 53), timeout=2)
+        return True
+    except OSError:
+        return False
 
 # GPIO CONTROL FUNCTION
 def reset_all_pins():
@@ -151,7 +165,7 @@ def toggle_brake():
             logger.info("Brake OFF")
 
 def toggle_emergency():
-    global is_emergency, is_brake
+    global is_emergency, is_brake, is_autonomous
     with gpio_lock:
         if not is_emergency:
             GPIO.output(EMERGENCY_PIN, GPIO.HIGH)
@@ -366,7 +380,10 @@ def command_listener():
                         
                         # Execute the command using command map
                         if cmd in COMMAND_MAP:
-                            COMMAND_MAP[cmd]()
+                            try:
+                                COMMAND_MAP[cmd]()
+                            except Exception as e:
+                                logger.error(f"Command execution error {cmd}: {e}")
                         else:
                             logger.warning(f"Unknown command: {cmd}")
                     except IndexError:
