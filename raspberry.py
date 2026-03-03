@@ -76,25 +76,22 @@ def life_sign_thread():
 
     while True:
         now = time.time()
-        
         backend_alive = (now - last_ping_time) < PING_TIMEOUT
-        internet_alive = has_internet()
-
+        
         with gpio_lock:
-            if backend_alive and internet_alive:
+            if backend_alive:
                 GPIO.output(LIFESIGN_PIN, GPIO.HIGH)
             else:
                 GPIO.output(LIFESIGN_PIN, GPIO.LOW)
-        
-        time.sleep(LIFESIGN_INTERVAL)
 
-# Internet connection check
-def has_internet():
-    try:
-        socket.create_connection(("8.8.8.8", 53), timeout=2)
-        return True
-    except OSError:
-        return False
+                # FAIL-SAFE: Bağlantı yoksa sistemi güvenli duruma geçir
+                GPIO.output(FORWARD_PIN, GPIO.LOW)
+                GPIO.output(BACKWARD_PIN, GPIO.LOW)
+                GPIO.output(BRAKE_PIN, GPIO.HIGH)  # Freni aç
+
+                logger.warning("Heartbeat lost! System forced to safe state (BRAKE ON)")
+               
+        time.sleep(LIFESIGN_INTERVAL)
 
 # GPIO CONTROL FUNCTION
 def reset_all_pins():
@@ -294,9 +291,11 @@ def tcp_send_data(data):
             except (BrokenPipeError, ConnectionResetError) as e:
                 logger.warning(f"Connection lost while sending: {e}")
                 is_connected = False
+                last_ping_time = 0
             except OSError as e:
                 logger.error(f"Failed to send data: {e}")
                 is_connected = False
+                last_ping_time = 0
             except Exception as e:
                 logger.error(f"Unexpected error sending data: {e}")
             finally:
