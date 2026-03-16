@@ -216,7 +216,7 @@ def autonomous_off():
 
 # Port numbers of devices
 ARDUINO = "arduino"
-ESP32 = "esp32"
+STM32 = "stm32"
 
 # Command mapping (DRY principle)
 COMMAND_MAP = {
@@ -231,9 +231,9 @@ COMMAND_MAP = {
 
 serial_nodes = {
     '1': {'port': '/dev/ttyUSB0', 'type': ARDUINO},
-    '2': {'port': '/dev/ttyUSB1', 'type': ESP32},
+    '2': {'port': '/dev/ttyUSB1', 'type': STM32},
     '3': {'port': '/dev/ttyACM0', 'type': ARDUINO},
-    '4': {'port': '/dev/ttyACM1', 'type': ESP32},
+    '4': {'port': '/dev/ttyACM1', 'type': STM32},
 }
 devices = {node_id: None for node_id in serial_nodes.keys()}
 
