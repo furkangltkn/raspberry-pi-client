@@ -40,7 +40,8 @@ SERVER_PORT = config.getint('server', 'port', fallback=5005)
 # Configuration for GPIO pins
 FORWARD_PIN = config.getint('gpio', 'forward_pin')
 BACKWARD_PIN = config.getint('gpio', 'backward_pin')
-BRAKE_PIN = config.getint('gpio', 'brake_pin')
+FRONT_BRAKE_PIN = config.getint('gpio', 'front_brake_pin')
+REAR_BRAKE_PIN = config.getint('gipio', 'rear_brake_pin')
 AUTONOMOUS_PIN = config.getint('gpio', 'autonomous_pin')
 EMERGENCY_PIN = config.getint('gpio', 'emergency_pin')
 LIFESIGN_PIN = config.getint('gpio', 'lifesign_pin')
@@ -57,13 +58,16 @@ TCP_RECONNECT_INTERVAL = config.getint('timings', 'tcp_reconnect_interval', fall
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(FORWARD_PIN, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(BACKWARD_PIN, GPIO.OUT, initial=GPIO.LOW)
-GPIO.setup(BRAKE_PIN, GPIO.OUT, initial=GPIO.LOW)
+GPIO.setup(FRONT_BRAKE_PIN, GPIO.OUT, initial=GPIO.LOW)
+GPIO.setup(REAR_BRAKE_PIN, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(AUTONOMOUS_PIN, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(EMERGENCY_PIN, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(LIFESIGN_PIN, GPIO.OUT, initial=GPIO.LOW)
 
 # Setup Global Situations
 is_brake = False
+is_front_brake = False
+is_rear_brake = False
 is_emergency = False
 is_autonomous = False
 is_connected = False
@@ -72,7 +76,7 @@ last_ping_time = 0
 
 # LIFE SIGN THREAD
 def life_sign_thread():
-    global last_ping_time, is_connected
+    global last_ping_time, is_connected, is_front_brake, is_rear_brake, is_brake
 
     while True:
         now = time.time()
@@ -87,7 +91,12 @@ def life_sign_thread():
                 # FAIL-SAFE: Bağlantı yoksa sistemi güvenli duruma geçir
                 GPIO.output(FORWARD_PIN, GPIO.LOW)
                 GPIO.output(BACKWARD_PIN, GPIO.LOW)
-                GPIO.output(BRAKE_PIN, GPIO.HIGH)  # Freni aç
+                GPIO.output(FRONT_BRAKE_PIN, GPIO.HIGH)  # Freni aç
+                GPIO.output(REAR_BRAKE_PIN, GPIO.HIGH)
+
+                is_front_brake = True
+                is_rear_brake = True
+                is_brake = True
 
                 logger.warning("Heartbeat lost! System forced to safe state (BRAKE ON)")
                
@@ -95,20 +104,23 @@ def life_sign_thread():
 
 # GPIO CONTROL FUNCTION
 def reset_all_pins():
-    global is_brake, is_emergency, is_autonomous
+    global is_front_brake, is_rear_brake, is_brake, is_emergency, is_autonomous
     with gpio_lock:
         GPIO.output(FORWARD_PIN, GPIO.LOW)
         GPIO.output(BACKWARD_PIN, GPIO.LOW)
-        GPIO.output(BRAKE_PIN, GPIO.LOW)
+        GPIO.output(FRONT_BRAKE_PIN, GPIO.LOW)
+        GPIO.output(REAR_BRAKE_PIN, GPIO.LOW)
         GPIO.output(AUTONOMOUS_PIN, GPIO.LOW)
         GPIO.output(EMERGENCY_PIN, GPIO.LOW)
+        is_front_brake = False
+        is_rear_brake = False
         is_brake = False
         is_emergency = False
         is_autonomous = False
     logger.info("All GPIO pins have been reset")
 
 def run_forward():
-    global is_brake
+    global is_brake, is_front_brake, is_rear_brake
     with gpio_lock:
         if is_emergency:
             logger.warning("Cannot run forward while Emergency Stop is ON")
@@ -119,28 +131,26 @@ def run_forward():
         
         GPIO.output(FORWARD_PIN, GPIO.HIGH)
         GPIO.output(BACKWARD_PIN, GPIO.LOW)
-        GPIO.output(BRAKE_PIN, GPIO.LOW)
-        is_brake = False
+        
     logger.debug("Running Forward")
 
 def run_backward():
-    global is_brake
+    global is_brake, is_front_brake, is_rear_brake
     with gpio_lock:
         if is_emergency:
             logger.warning("Cannot run backward while Emergency Stop is ON")
             return
         if is_brake:
             logger.warning("Cannot run backward while Brake is ON")
-            return
+            return    
             
         GPIO.output(FORWARD_PIN, GPIO.LOW)
         GPIO.output(BACKWARD_PIN, GPIO.HIGH)
-        GPIO.output(BRAKE_PIN, GPIO.LOW)
-        is_brake = False
+       
     logger.debug("Running Backward")
 
 def toggle_brake():
-    global is_brake, is_autonomous
+    global is_brake, is_front_brake, is_rear_brake, is_autonomous
     with gpio_lock:
         if not is_brake:
             # Fren yapılırsa otonom mod kapatılır (kontrol manuel önceliklendirilir)
@@ -149,20 +159,71 @@ def toggle_brake():
                 is_autonomous = False
                 logger.info("Autonomous Mode OFF due to Brake ON")
 
-            GPIO.output(BRAKE_PIN, GPIO.HIGH)
+            GPIO.output(FRONT_BRAKE_PIN, GPIO.HIGH)
+            GPIO.output(REAR_BRAKE_PIN, GPIO.HIGH)
+            
             GPIO.output(FORWARD_PIN, GPIO.LOW)
             GPIO.output(BACKWARD_PIN, GPIO.LOW)
+            
+            is_front_brake = True
+            is_rear_brake = True
             is_brake = True
-            logger.info("Brake ON")
+            logger.info("Main Brake ON")
+        
         else:
-            GPIO.output(BRAKE_PIN, GPIO.LOW)
+            GPIO.output(FRONT_BRAKE_PIN, GPIO.LOW)
+            GPIO.output(REAR_BRAKE_PIN, GPIO.LOW)
+            
+            is_front_brake = False
+            is_rear_brake = False
+            is_brake = False
+            logger.info("Main Brake OFF")
+
+def toggle_front_brake():
+    global is_front_brake, is_brake, is_autonomous
+    with gpio_lock:
+        if not is_front_brake:
+            if is_autonomous:
+                GPIO.output(AUTONOMOUS_PIN, GPIO.LOW)
+                is_autonomous = False
+
             GPIO.output(FORWARD_PIN, GPIO.LOW)
             GPIO.output(BACKWARD_PIN, GPIO.LOW)
-            is_brake = False
-            logger.info("Brake OFF")
 
+            GPIO.output(FRONT_BRAKE_PIN, GPIO.HIGH)
+            is_front_brake = True
+            logger.info("Front Brake ON")    
+        else:
+            GPIO.output(FRONT_BRAKE_PIN, GPIO.LOW)
+            is_front_brake = False
+            logger.info("Front Brake OFF")
+
+        is_brake = is_front_brake or is_rear_brake
+
+def toggle_rear_brake():
+    global is_rear_brake, is_brake, is_autonomous
+    with gpio_lock:
+        if not is_rear_brake:
+            if is_autonomous:
+                GPIO.output(AUTONOMOUS_PIN, GPIO.LOW)
+                is_autonomous = False
+
+            GPIO.output(FORWARD_PIN, GPIO.LOW)
+            GPIO.output(BACKWARD_PIN, GPIO.LOW)
+
+            GPIO.output(REAR_BRAKE_PIN, GPIO.HIGH)
+            is_rear_brake = True
+            logger.info("Rear Brake ON")
+        
+        else:
+            GPIO.output(REAR_BRAKE_PIN, GPIO.LOW)
+            is_rear_brake = False
+            logger.info("Rear Brake OFF")
+
+        is_brake = is_front_brake or is_rear_brake
+                 
 def toggle_emergency():
-    global is_emergency, is_brake, is_autonomous
+    global is_emergency, is_brake, is_front_brake, is_rear_brake, is_autonomous
     with gpio_lock:
         if not is_emergency:
             GPIO.output(EMERGENCY_PIN, GPIO.HIGH)
@@ -178,7 +239,11 @@ def toggle_emergency():
             GPIO.output(BACKWARD_PIN, GPIO.LOW)
 
             # Freni aç (acil durumlarda fren yap)
-            GPIO.output(BRAKE_PIN, GPIO.HIGH)
+            GPIO.output(FRONT_BRAKE_PIN, GPIO.HIGH)
+            GPIO.output(REAR_BRAKE_PIN, GPIO.HIGH)
+
+            is_front_brake = True
+            is_rear_brake = True
             is_emergency = True
             is_brake = True
             logger.warning("Emergency Stop ON")
@@ -188,13 +253,16 @@ def toggle_emergency():
             logger.info("Emergency Stop OFF")
 
 def autonomous_on():
-    global is_autonomous, is_brake
+    global is_autonomous, is_front_brake, is_rear_brake, is_brake
     with gpio_lock:
         if is_emergency:
             logger.warning("Cannot enable Autonomous Mode while Emergency Stop is ON")
             return
         # Freni bırak
-        GPIO.output(BRAKE_PIN, GPIO.LOW)  
+        GPIO.output(FRONT_BRAKE_PIN, GPIO.LOW)  
+        GPIO.output(REAR_BRAKE_PIN, GPIO.LOW)
+        is_front_brake = False
+        is_rear_brake = False
         is_brake = False 
         # Otonom modu aç
         GPIO.output(AUTONOMOUS_PIN, GPIO.HIGH)
@@ -223,6 +291,8 @@ COMMAND_MAP = {
     b"FORWARD": run_forward,
     b"BACKWARD": run_backward,
     b"BRAKE": toggle_brake,
+    b"FRONT_BRAKE": toggle_front_brake,
+    b"REAR_BRAKE": toggle_rear_brake,
     b"EMERGENCY": toggle_emergency,
     b"AUTONOMOUS_ON": autonomous_on,
     b"AUTONOMOUS_OFF": autonomous_off,
