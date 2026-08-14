@@ -41,7 +41,7 @@ SERVER_PORT = config.getint('server', 'port', fallback=5005)
 FORWARD_PIN = config.getint('gpio', 'forward_pin')
 BACKWARD_PIN = config.getint('gpio', 'backward_pin')
 FRONT_BRAKE_PIN = config.getint('gpio', 'front_brake_pin')
-REAR_BRAKE_PIN = config.getint('gipio', 'rear_brake_pin')
+REAR_BRAKE_PIN = config.getint('gpio', 'rear_brake_pin')
 AUTONOMOUS_PIN = config.getint('gpio', 'autonomous_pin')
 EMERGENCY_PIN = config.getint('gpio', 'emergency_pin')
 LIFESIGN_PIN = config.getint('gpio', 'lifesign_pin')
@@ -76,7 +76,7 @@ last_ping_time = 0
 
 # LIFE SIGN THREAD
 def life_sign_thread():
-    global last_ping_time, is_connected, is_front_brake, is_rear_brake, is_brake
+    global last_ping_time, is_connected
 
     while True:
         now = time.time()
@@ -91,13 +91,7 @@ def life_sign_thread():
                 # FAIL-SAFE: Bağlantı yoksa sistemi güvenli duruma geçir
                 GPIO.output(FORWARD_PIN, GPIO.LOW)
                 GPIO.output(BACKWARD_PIN, GPIO.LOW)
-                GPIO.output(FRONT_BRAKE_PIN, GPIO.HIGH)  # Freni aç
-                GPIO.output(REAR_BRAKE_PIN, GPIO.HIGH)
-
-                is_front_brake = True
-                is_rear_brake = True
-                is_brake = True
-
+                
                 logger.warning("Heartbeat lost! System forced to safe state (BRAKE ON)")
                
         time.sleep(LIFESIGN_INTERVAL)
@@ -152,7 +146,8 @@ def run_backward():
 def toggle_brake():
     global is_brake, is_front_brake, is_rear_brake, is_autonomous
     with gpio_lock:
-        if not is_brake:
+        # Sadece biri açıksa veya ikisi de kapalıysa -> İkisini de aç (Tam Fren)
+        if not (is_front_brake and is_rear_brake):
             # Fren yapılırsa otonom mod kapatılır (kontrol manuel önceliklendirilir)
             if is_autonomous:
                 GPIO.output(AUTONOMOUS_PIN, GPIO.LOW)
@@ -180,7 +175,7 @@ def toggle_brake():
             logger.info("Main Brake OFF")
 
 def toggle_front_brake():
-    global is_front_brake, is_brake, is_autonomous
+    global is_front_brake, is_rear_brake, is_brake, is_autonomous
     with gpio_lock:
         if not is_front_brake:
             if is_autonomous:
@@ -201,7 +196,7 @@ def toggle_front_brake():
         is_brake = is_front_brake or is_rear_brake
 
 def toggle_rear_brake():
-    global is_rear_brake, is_brake, is_autonomous
+    global is_rear_brake, is_front_brake, is_brake, is_autonomous
     with gpio_lock:
         if not is_rear_brake:
             if is_autonomous:
@@ -223,7 +218,7 @@ def toggle_rear_brake():
         is_brake = is_front_brake or is_rear_brake
                  
 def toggle_emergency():
-    global is_emergency, is_brake, is_front_brake, is_rear_brake, is_autonomous
+    global is_emergency, is_autonomous
     with gpio_lock:
         if not is_emergency:
             GPIO.output(EMERGENCY_PIN, GPIO.HIGH)
@@ -238,14 +233,7 @@ def toggle_emergency():
             GPIO.output(FORWARD_PIN, GPIO.LOW)
             GPIO.output(BACKWARD_PIN, GPIO.LOW)
 
-            # Freni aç (acil durumlarda fren yap)
-            GPIO.output(FRONT_BRAKE_PIN, GPIO.HIGH)
-            GPIO.output(REAR_BRAKE_PIN, GPIO.HIGH)
-
-            is_front_brake = True
-            is_rear_brake = True
             is_emergency = True
-            is_brake = True
             logger.warning("Emergency Stop ON")
         else:
             GPIO.output(EMERGENCY_PIN, GPIO.LOW)
@@ -300,9 +288,9 @@ COMMAND_MAP = {
 }
 
 serial_nodes = {
-    '1': {'port': '/dev/ttyUSB0', 'type': ARDUINO},
-    '2': {'port': '/dev/ttyUSB1', 'type': STM32},
-    '3': {'port': '/dev/ttyACM0', 'type': ARDUINO},
+    '1': {'port': '/dev/arduino1', 'type': ARDUINO}, #Barış
+    '2': {'port': '/dev/arduino2', 'type': ARDUINO}, #Barış
+    '3': {'port': '/dev/arduino3', 'type': ARDUINO}, #Reyhan
     '4': {'port': '/dev/ttyACM1', 'type': STM32},
 }
 devices = {node_id: None for node_id in serial_nodes.keys()}
@@ -429,6 +417,7 @@ def command_listener():
             while b'\n' in buffer:
                 line, buffer = buffer.split(b'\n', 1)
                 line = line.strip()
+                line = line.lstrip(b'\xef\xbb\xbf')
                 if not line:
                     continue
 
@@ -518,7 +507,6 @@ def serial_reader(port):
             except (OSError, AttributeError):
                 pass
             devices[device_id] = None
-        time.sleep(0.1)   
 
 # MAIN THREADS
 
@@ -535,7 +523,7 @@ if __name__ == "__main__":
     
     logger.info(f"Server: {SERVER_IP}:{SERVER_PORT}")
     logger.info(f"Serial baudrates: {SERIAL_BAUDRATES}")
-    logger.info(f"GPIO pins - Forward: {FORWARD_PIN}, Backward: {BACKWARD_PIN}, Brake: {BRAKE_PIN}")
+    logger.info(f"GPIO pins - Forward: {FORWARD_PIN}, Backward: {BACKWARD_PIN}, Front Brake: {FRONT_BRAKE_PIN}, Rear Brake: {REAR_BRAKE_PIN}")
     
     # TCP bağlantısını başlat
     tcp_connected()
@@ -567,4 +555,3 @@ if __name__ == "__main__":
             logger.error(f"Error during GPIO cleanup: {e}")
         logger.info("System stopped gracefully")
         sys.exit(0)
-
