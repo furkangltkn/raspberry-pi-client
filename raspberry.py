@@ -45,6 +45,7 @@ REAR_BRAKE_PIN = config.getint('gpio', 'rear_brake_pin')
 AUTONOMOUS_PIN = config.getint('gpio', 'autonomous_pin')
 EMERGENCY_PIN = config.getint('gpio', 'emergency_pin')
 LIFESIGN_PIN = config.getint('gpio', 'lifesign_pin')
+RESET_PIN = config.getint('gpio', 'reset_pin')
 
 # Serial Configuration
 SERIAL_BAUDRATES = {k: config.getint('serial_baudrate', k, fallback=9600) for k in config['serial_baudrate']} # Device ID focused baud rate
@@ -53,6 +54,7 @@ TCP_RECV_BUFFER = config.getint('timings', 'tcp_recv_buffer_size', fallback=1024
 LIFESIGN_INTERVAL = config.getint('timings', 'lifesign_interval', fallback=1)
 PING_TIMEOUT = config.getint('timings', 'ping_timeout', fallback=5)
 TCP_RECONNECT_INTERVAL = config.getint('timings', 'tcp_reconnect_interval', fallback=5)
+RESET_PULSE_DURATION = config.getfloat('timings', 'reset_pulse_duration', fallback=1.0)
 
 # Setup GPIO
 GPIO.setmode(GPIO.BCM)
@@ -63,6 +65,7 @@ GPIO.setup(REAR_BRAKE_PIN, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(AUTONOMOUS_PIN, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(EMERGENCY_PIN, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(LIFESIGN_PIN, GPIO.OUT, initial=GPIO.LOW)
+GPIO.setup(RESET_PIN, GPIO.OUT, initial=GPIO.LOW)
 
 # Setup Global Situations
 is_brake = False
@@ -100,6 +103,7 @@ def life_sign_thread():
 def reset_all_pins():
     global is_front_brake, is_rear_brake, is_brake, is_emergency, is_autonomous
     with gpio_lock:
+        # Kontrol pinlerini ve yazılım durumlarını başlangıç haline getir.
         GPIO.output(FORWARD_PIN, GPIO.LOW)
         GPIO.output(BACKWARD_PIN, GPIO.LOW)
         GPIO.output(FRONT_BRAKE_PIN, GPIO.LOW)
@@ -111,7 +115,19 @@ def reset_all_pins():
         is_brake = False
         is_emergency = False
         is_autonomous = False
-    logger.info("All GPIO pins have been reset")
+
+        # Bağlı karta aktif-HIGH reset darbesi gönder.
+        try:
+            GPIO.output(RESET_PIN, GPIO.HIGH)
+            time.sleep(RESET_PULSE_DURATION)
+        finally:
+            GPIO.output(RESET_PIN, GPIO.LOW)
+
+    logger.info(
+        "System reset completed (GPIO %s pulse: %.3f seconds)",
+        RESET_PIN,
+        RESET_PULSE_DURATION,
+    )
 
 def run_forward():
     global is_brake, is_front_brake, is_rear_brake
