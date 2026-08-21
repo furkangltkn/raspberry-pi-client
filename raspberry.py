@@ -4,6 +4,7 @@ import threading
 import time
 import RPi.GPIO as GPIO
 import logging
+from logging.handlers import RotatingFileHandler
 import configparser
 import os
 import sys
@@ -26,7 +27,12 @@ logging.basicConfig(
     level=config.get('logging', 'level', fallback='INFO'),
     format=config.get('logging', 'format', fallback='%(asctime)s - %(name)s - %(levelname)s - %(message)s'),
     handlers=[
-        logging.FileHandler('raspberry_pi_control.log'),
+        RotatingFileHandler(
+            'raspberry_pi_control.log',
+            maxBytes=10 * 1024 * 1024,
+            backupCount=5,
+            encoding='utf-8'
+        ),
         logging.StreamHandler()
     ]
 )
