@@ -45,7 +45,8 @@ REAR_BRAKE_PIN = config.getint('gpio', 'rear_brake_pin')
 AUTONOMOUS_PIN = config.getint('gpio', 'autonomous_pin')
 EMERGENCY_PIN = config.getint('gpio', 'emergency_pin')
 LIFESIGN_PIN = config.getint('gpio', 'lifesign_pin')
-RESET_PIN = config.getint('gpio', 'reset_pin')
+RESET_PIN1 = config.getint('gpio', 'reset_pin1')
+RESET_PIN2 = config.getint('gpio', 'reset_pin2')
 
 # Serial Configuration
 SERIAL_BAUDRATES = {k: config.getint('serial_baudrate', k, fallback=9600) for k in config['serial_baudrate']} # Device ID focused baud rate
@@ -65,7 +66,8 @@ GPIO.setup(REAR_BRAKE_PIN, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(AUTONOMOUS_PIN, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(EMERGENCY_PIN, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(LIFESIGN_PIN, GPIO.OUT, initial=GPIO.LOW)
-GPIO.setup(RESET_PIN, GPIO.OUT, initial=GPIO.LOW)
+GPIO.setup(RESET_PIN1, GPIO.OUT, initial=GPIO.LOW)
+GPIO.setup(RESET_PIN2, GPIO.OUT, initial=GPIO.HIGH)
 
 # Setup Global Situations
 is_brake = False
@@ -116,16 +118,19 @@ def reset_all_pins():
         is_emergency = False
         is_autonomous = False
 
-        # Bağlı karta aktif-HIGH reset darbesi gönder.
+        # RESET_PIN1 aktif-HIGH, RESET_PIN2 ise aktif-LOW reset darbesi kullanır.
         try:
-            GPIO.output(RESET_PIN, GPIO.HIGH)
+            GPIO.output(RESET_PIN1, GPIO.HIGH)
+            GPIO.output(RESET_PIN2, GPIO.LOW)
             time.sleep(RESET_PULSE_DURATION)
         finally:
-            GPIO.output(RESET_PIN, GPIO.LOW)
+            GPIO.output(RESET_PIN1, GPIO.LOW)
+            GPIO.output(RESET_PIN2, GPIO.HIGH)
 
     logger.info(
-        "System reset completed (GPIO %s pulse: %.3f seconds)",
-        RESET_PIN,
+        "System reset completed (GPIO %s HIGH pulse, GPIO %s LOW pulse: %.3f seconds)",
+        RESET_PIN1,
+        RESET_PIN2,
         RESET_PULSE_DURATION,
     )
 
@@ -307,7 +312,7 @@ serial_nodes = {
     '1': {'port': '/dev/arduino1', 'type': ARDUINO}, #Barış
     '2': {'port': '/dev/arduino2', 'type': ARDUINO}, #Barış
     '3': {'port': '/dev/arduino3', 'type': ARDUINO}, #Reyhan
-    '4': {'port': '/dev/ttyACM1', 'type': STM32},
+    '4': {'port': '/dev/ttyACM1', 'type': STM32}, #Berna
 }
 devices = {node_id: None for node_id in serial_nodes.keys()}
 
