@@ -53,6 +53,12 @@ EMERGENCY_PIN = config.getint('gpio', 'emergency_pin')
 LIFESIGN_PIN = config.getint('gpio', 'lifesign_pin')
 RESET_PIN1 = config.getint('gpio', 'reset_pin1')
 RESET_PIN2 = config.getint('gpio', 'reset_pin2')
+VFD_PWM_PIN = config.getint('vfd', 'pwm_pin', fallback=18)
+VFD_PWM_FREQUENCY = config.getint('vfd', 'pwm_frequency', fallback=1000)
+VFD_PWM_MAX = (1 << config.getint('vfd', 'resolution_bits', fallback=10)) - 1
+VFD_MIN_HZ = config.getint('vfd', 'min_hz', fallback=0)
+VFD_MAX_HZ = config.getint('vfd', 'max_hz', fallback=50)
+VFD_STEP_HZ = config.getint('vfd', 'step_hz', fallback=5)
 
 # Serial Configuration
 SERIAL_BAUDRATES = {k: config.getint('serial_baudrate', k, fallback=9600) for k in config['serial_baudrate']} # Device ID focused baud rate
@@ -74,6 +80,9 @@ GPIO.setup(EMERGENCY_PIN, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(LIFESIGN_PIN, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(RESET_PIN1, GPIO.OUT, initial=GPIO.LOW)
 GPIO.setup(RESET_PIN2, GPIO.OUT, initial=GPIO.HIGH)
+GPIO.setup(VFD_PWM_PIN, GPIO.OUT, initial=GPIO.LOW)
+vfd_pwm = GPIO.PWM(VFD_PWM_PIN, VFD_PWM_FREQUENCY)
+vfd_pwm.start(0)
 
 # Setup Global Situations
 is_brake = False
@@ -82,6 +91,8 @@ is_rear_brake = False
 is_emergency = False
 is_autonomous = False
 is_connected = False
+vfd_hz = 0
+vfd_pwm_value = 0
 gpio_lock = threading.Lock()
 last_ping_time = 0
 
@@ -98,16 +109,21 @@ def life_sign_thread():
                 GPIO.output(LIFESIGN_PIN, GPIO.HIGH)
             else:
                 GPIO.output(LIFESIGN_PIN, GPIO.LOW)
-
-                # FAIL-SAFE: Bağlantı yoksa sistemi güvenli duruma geçir
-                GPIO.output(FORWARD_PIN, GPIO.LOW)
-                GPIO.output(BACKWARD_PIN, GPIO.LOW)
-                
-                logger.warning("Heartbeat lost! System forced to safe state (BRAKE ON)")
+                logger.warning("Heartbeat lost! Lifesign set LOW for emergency Arduino")
                
         time.sleep(LIFESIGN_INTERVAL)
 
 # GPIO CONTROL FUNCTION
+def _set_vfd_frequency_locked(target_hz):
+    """Apply an already validated VFD target while gpio_lock is held."""
+    global vfd_hz, vfd_pwm_value
+    vfd_hz = target_hz
+    vfd_pwm_value = round((target_hz / VFD_MAX_HZ) * VFD_PWM_MAX) if target_hz else 0
+    duty_cycle = (vfd_pwm_value / VFD_PWM_MAX) * 100
+    vfd_pwm.ChangeDutyCycle(duty_cycle)
+    logger.info("VFD frequency set to %s Hz (PWM %s/%s, %.2f%%)",
+                vfd_hz, vfd_pwm_value, VFD_PWM_MAX, duty_cycle)
+
 def reset_all_pins():
     global is_front_brake, is_rear_brake, is_brake, is_emergency, is_autonomous
     with gpio_lock:
@@ -118,6 +134,7 @@ def reset_all_pins():
         GPIO.output(REAR_BRAKE_PIN, GPIO.LOW)
         GPIO.output(AUTONOMOUS_PIN, GPIO.LOW)
         GPIO.output(EMERGENCY_PIN, GPIO.LOW)
+        _set_vfd_frequency_locked(0)
         is_front_brake = False
         is_rear_brake = False
         is_brake = False
@@ -139,36 +156,80 @@ def reset_all_pins():
         RESET_PIN2,
         RESET_PULSE_DURATION,
     )
+    return True, "executed"
 
 def run_forward():
     global is_brake, is_front_brake, is_rear_brake
     with gpio_lock:
         if is_emergency:
             logger.warning("Cannot run forward while Emergency Stop is ON")
-            return
+            return False, "emergency_active"
         if is_brake:
             logger.warning("Cannot run forward while Brake is ON")
-            return
-        
+            return False, "brake_active"
+
+        # Aynı yön komutuna tekrar basılırsa motor sürme sinyalini kes.
+        if (GPIO.input(FORWARD_PIN) == GPIO.HIGH and
+                GPIO.input(BACKWARD_PIN) == GPIO.LOW):
+            GPIO.output(FORWARD_PIN, GPIO.LOW)
+            GPIO.output(BACKWARD_PIN, GPIO.LOW)
+            _set_vfd_frequency_locked(0)
+            logger.info("Forward command toggled OFF, motor stopped and VFD reset to 0 Hz")
+            return True, "stopped"
+
         GPIO.output(FORWARD_PIN, GPIO.HIGH)
         GPIO.output(BACKWARD_PIN, GPIO.LOW)
         
     logger.debug("Running Forward")
+    return True, "executed"
 
 def run_backward():
     global is_brake, is_front_brake, is_rear_brake
     with gpio_lock:
         if is_emergency:
             logger.warning("Cannot run backward while Emergency Stop is ON")
-            return
+            return False, "emergency_active"
         if is_brake:
             logger.warning("Cannot run backward while Brake is ON")
-            return    
-            
+            return False, "brake_active"
+
+        # Aynı yön komutuna tekrar basılırsa motor sürme sinyalini kes.
+        if (GPIO.input(BACKWARD_PIN) == GPIO.HIGH and
+                GPIO.input(FORWARD_PIN) == GPIO.LOW):
+            GPIO.output(FORWARD_PIN, GPIO.LOW)
+            GPIO.output(BACKWARD_PIN, GPIO.LOW)
+            _set_vfd_frequency_locked(0)
+            logger.info("Backward command toggled OFF, motor stopped and VFD reset to 0 Hz")
+            return True, "stopped"
+
         GPIO.output(FORWARD_PIN, GPIO.LOW)
         GPIO.output(BACKWARD_PIN, GPIO.HIGH)
        
     logger.debug("Running Backward")
+    return True, "executed"
+
+def increase_vfd_frequency():
+    with gpio_lock:
+        if is_emergency:
+            return False, "emergency_active"
+        if is_brake:
+            return False, "brake_active"
+        target_hz = min(vfd_hz + VFD_STEP_HZ, VFD_MAX_HZ)
+        if target_hz == vfd_hz:
+            return True, "maximum_frequency"
+        _set_vfd_frequency_locked(target_hz)
+    return True, "executed"
+
+def decrease_vfd_frequency():
+    with gpio_lock:
+        target_hz = max(vfd_hz - VFD_STEP_HZ, VFD_MIN_HZ)
+        if target_hz == vfd_hz:
+            return True, "minimum_frequency"
+        _set_vfd_frequency_locked(target_hz)
+        if target_hz == 0:
+            GPIO.output(FORWARD_PIN, GPIO.LOW)
+            GPIO.output(BACKWARD_PIN, GPIO.LOW)
+    return True, "executed"
 
 def toggle_brake():
     global is_brake, is_front_brake, is_rear_brake, is_autonomous
@@ -186,6 +247,7 @@ def toggle_brake():
             
             GPIO.output(FORWARD_PIN, GPIO.LOW)
             GPIO.output(BACKWARD_PIN, GPIO.LOW)
+            _set_vfd_frequency_locked(0)
             
             is_front_brake = True
             is_rear_brake = True
@@ -200,6 +262,7 @@ def toggle_brake():
             is_rear_brake = False
             is_brake = False
             logger.info("Main Brake OFF")
+    return True, "executed"
 
 def toggle_front_brake():
     global is_front_brake, is_rear_brake, is_brake, is_autonomous
@@ -211,6 +274,7 @@ def toggle_front_brake():
 
             GPIO.output(FORWARD_PIN, GPIO.LOW)
             GPIO.output(BACKWARD_PIN, GPIO.LOW)
+            _set_vfd_frequency_locked(0)
 
             GPIO.output(FRONT_BRAKE_PIN, GPIO.HIGH)
             is_front_brake = True
@@ -221,6 +285,7 @@ def toggle_front_brake():
             logger.info("Front Brake OFF")
 
         is_brake = is_front_brake or is_rear_brake
+    return True, "executed"
 
 def toggle_rear_brake():
     global is_rear_brake, is_front_brake, is_brake, is_autonomous
@@ -232,6 +297,7 @@ def toggle_rear_brake():
 
             GPIO.output(FORWARD_PIN, GPIO.LOW)
             GPIO.output(BACKWARD_PIN, GPIO.LOW)
+            _set_vfd_frequency_locked(0)
 
             GPIO.output(REAR_BRAKE_PIN, GPIO.HIGH)
             is_rear_brake = True
@@ -243,6 +309,7 @@ def toggle_rear_brake():
             logger.info("Rear Brake OFF")
 
         is_brake = is_front_brake or is_rear_brake
+    return True, "executed"
                  
 def toggle_emergency():
     global is_emergency, is_autonomous
@@ -259,6 +326,7 @@ def toggle_emergency():
             # Motorları durdur
             GPIO.output(FORWARD_PIN, GPIO.LOW)
             GPIO.output(BACKWARD_PIN, GPIO.LOW)
+            _set_vfd_frequency_locked(0)
 
             is_emergency = True
             logger.warning("Emergency Stop ON")
@@ -266,13 +334,14 @@ def toggle_emergency():
             GPIO.output(EMERGENCY_PIN, GPIO.LOW)
             is_emergency = False
             logger.info("Emergency Stop OFF")
+    return True, "executed"
 
 def autonomous_on():
     global is_autonomous, is_front_brake, is_rear_brake, is_brake
     with gpio_lock:
         if is_emergency:
             logger.warning("Cannot enable Autonomous Mode while Emergency Stop is ON")
-            return
+            return False, "emergency_active"
         # Freni bırak
         GPIO.output(FRONT_BRAKE_PIN, GPIO.LOW)  
         GPIO.output(REAR_BRAKE_PIN, GPIO.LOW)
@@ -284,6 +353,7 @@ def autonomous_on():
         is_autonomous = True
         
         logger.info("Autonomous Mode ON")
+    return True, "executed"
 
 def autonomous_off():
     global is_autonomous
@@ -293,9 +363,11 @@ def autonomous_off():
         # Motorları durdur
         GPIO.output(FORWARD_PIN, GPIO.LOW)
         GPIO.output(BACKWARD_PIN, GPIO.LOW)
+        _set_vfd_frequency_locked(0)
 
         is_autonomous = False
         logger.info("Autonomous Mode OFF, motor stopped")
+    return True, "executed"
 
 # Port numbers of devices
 ARDUINO = "arduino"
@@ -305,6 +377,8 @@ STM32 = "stm32"
 COMMAND_MAP = {
     b"FORWARD": run_forward,
     b"BACKWARD": run_backward,
+    b"VFD_INCREASE": increase_vfd_frequency,
+    b"VFD_DECREASE": decrease_vfd_frequency,
     b"BRAKE": toggle_brake,
     b"FRONT_BRAKE": toggle_front_brake,
     b"REAR_BRAKE": toggle_rear_brake,
@@ -317,8 +391,8 @@ COMMAND_MAP = {
 serial_nodes = {
     '1': {'port': '/dev/arduino1', 'type': ARDUINO}, #Barış
     '2': {'port': '/dev/arduino2', 'type': ARDUINO}, #Barış
-    '3': {'port': '/dev/arduino3', 'type': ARDUINO}, #Reyhan
-    '4': {'port': '/dev/ttyACM1', 'type': STM32}, #Berna
+    '3': {'port': '/dev/mega', 'type': ARDUINO}, #Reyhan
+    '4': {'port': '/dev/stm32', 'type': STM32}, #Berna
 }
 devices = {node_id: None for node_id in serial_nodes.keys()}
 
@@ -326,8 +400,33 @@ devices = {node_id: None for node_id in serial_nodes.keys()}
 client = None
 tcp_lock = threading.Lock()
 
+def control_state_payload():
+    with gpio_lock:
+        return (
+            f"forward:{int(GPIO.input(FORWARD_PIN) == GPIO.HIGH)},"
+            f"backward:{int(GPIO.input(BACKWARD_PIN) == GPIO.HIGH)},"
+            f"frontBrake:{int(is_front_brake)},rearBrake:{int(is_rear_brake)},"
+            f"brake:{int(is_brake)},emergency:{int(is_emergency)},"
+            f"autonomous:{int(is_autonomous)},vfdHz:{vfd_hz},"
+            f"vfdPwmValue:{vfd_pwm_value}"
+        )
+
+def close_connection(expected_client):
+    """Only close/clear the socket owned by the failing operation."""
+    global client, is_connected, last_ping_time
+    with tcp_lock:
+        if client is not expected_client:
+            return
+        try:
+            expected_client.close()
+        except (OSError, AttributeError):
+            pass
+        client = None
+        is_connected = False
+        last_ping_time = 0
+
 def tcp_connected():
-    global client, is_connected
+    global client, is_connected, last_ping_time
     with tcp_lock:
         if client is not None and is_connected:
             return True
@@ -337,6 +436,9 @@ def tcp_connected():
             client.connect((SERVER_IP, SERVER_PORT))
             client.settimeout(1.0)  # Remove timeout after connection
             is_connected = True
+            # İlk PING gelene kadar yeni bağlantıya watchdog süresi kadar tolerans tanı.
+            last_ping_time = time.time()
+            client.sendall(("STATE|" + control_state_payload() + "\n").encode())
             logger.info(f"Connected to server at {SERVER_IP}:{SERVER_PORT}")
             return True
         except socket.timeout:
@@ -414,28 +516,40 @@ def tcp_reconnect():
 def command_listener():
     global client, is_connected, last_ping_time
     buffer = b""
+    buffer_client = None
     while True:
-        if client is None:
-            last_ping_time = 0
+        with tcp_lock:
+            active_client = client if is_connected else None
+
+        if active_client is None:
+            buffer = b""
+            buffer_client = None
             time.sleep(1)
             continue
+
+        if buffer_client is not active_client:
+            buffer = b""
+            buffer_client = active_client
         try:
             # Read the command from the socket (Komutu soketten oku)
             try:
-                data = client.recv(1024)
+                data = active_client.recv(TCP_RECV_BUFFER)
             except socket.timeout:
+                # Ağ kablosu/Wi-Fi kesildiğinde TCP soketi EOF üretmeden yarı açık
+                # kalabilir. Backend PING'i kesildiyse soketi kapat; reconnect
+                # thread'i yeni bir TCP bağlantısı kursun.
+                if last_ping_time and (time.time() - last_ping_time) >= PING_TIMEOUT:
+                    logger.warning("Backend heartbeat timeout; closing stale TCP connection.")
+                    close_connection(active_client)
+                    buffer = b""
+                    buffer_client = None
                 continue    
             
             # Append received bytes to buffer; PING is handled when a full line arrives
             if not data:
-                with tcp_lock:
-                    try:
-                        client.close()
-                    except:
-                        pass
-                    client = None
-                    is_connected = False
-                    last_ping_time = 0
+                close_connection(active_client)
+                buffer = b""
+                buffer_client = None
                 continue
 
             buffer += data
@@ -453,24 +567,49 @@ def command_listener():
                 # Handle simple PING lines which indicate liveness
                 if line == b'PING':
                     last_ping_time = time.time()
+                    pong_failed = False
                     try:
-                        client.sendall(b'PONG\n')
-                    except:
-                        pass
+                        with tcp_lock:
+                            if client is active_client and is_connected:
+                                active_client.sendall(b'PONG\n')
+                    except (OSError, BrokenPipeError, ConnectionResetError) as e:
+                        logger.warning(f"PONG could not be sent, reconnecting: {e}")
+                        pong_failed = True
+                    if pong_failed:
+                        close_connection(active_client)
+                        buffer = b""
+                        buffer_client = None
                     continue
 
                 if line.startswith(b'CMD|'):
                     try:
-                        cmd = line.split(b'|', 1)[1].upper()
+                        parts = line.split(b'|', 2)
+                        if len(parts) == 3:
+                            command_id = parts[1].decode('ascii', errors='ignore')
+                            cmd = parts[2].upper()
+                        else:
+                            command_id = ""
+                            cmd = parts[1].upper()
                         
                         # Execute the command using command map
                         if cmd in COMMAND_MAP:
                             try:
-                                COMMAND_MAP[cmd]()
+                                result = COMMAND_MAP[cmd]()
+                                success, reason = result if isinstance(result, tuple) else (True, "executed")
+                                if command_id:
+                                    status = "OK" if success else "REJECTED"
+                                    ack = f"ACK|{command_id}|{status}|{cmd.decode()}|{reason}|{control_state_payload()}\n"
+                                    tcp_send_data(ack)
                             except Exception as e:
                                 logger.error(f"Command execution error {cmd}: {e}")
+                                if command_id:
+                                    ack = f"ACK|{command_id}|ERROR|{cmd.decode(errors='ignore')}|execution_error|{control_state_payload()}\n"
+                                    tcp_send_data(ack)
                         else:
                             logger.warning(f"Unknown command: {cmd}")
+                            if command_id:
+                                ack = f"ACK|{command_id}|REJECTED|{cmd.decode(errors='ignore')}|unknown_command|{control_state_payload()}\n"
+                                tcp_send_data(ack)
                     except IndexError:
                         logger.warning(f"Malformed command: {line}")
                 else:
@@ -481,15 +620,9 @@ def command_listener():
         except Exception as e:
             # Okuma sırasında hata olursa
             logger.error(f"Listen command error: {e}")
-            with tcp_lock:
-                try:
-                    if client:
-                        client.close()
-                except (OSError, AttributeError):
-                    pass
-                client = None
-                is_connected = False
-                last_ping_time = 0
+            close_connection(active_client)
+            buffer = b""
+            buffer_client = None
             time.sleep(1)
 
 # Reading data from serial devices
@@ -576,6 +709,7 @@ if __name__ == "__main__":
         logger.info("Shutting down system...")
         reset_all_pins()
         try:
+            vfd_pwm.stop()
             GPIO.cleanup()
             logger.info("GPIO cleanup completed")
         except Exception as e:
