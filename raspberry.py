@@ -69,6 +69,16 @@ PING_TIMEOUT = config.getint('timings', 'ping_timeout', fallback=5)
 TCP_RECONNECT_INTERVAL = config.getint('timings', 'tcp_reconnect_interval', fallback=5)
 RESET_PULSE_DURATION = config.getfloat('timings', 'reset_pulse_duration', fallback=1.0)
 
+# BNO055 connected directly to the Raspberry Pi over I2C (backend device 5)
+IMU_ENABLED = config.getboolean('imu', 'enabled', fallback=False)
+IMU_DEVICE_ID = config.get('imu', 'device_id', fallback='5')
+IMU_I2C_ADDRESS = int(config.get('imu', 'i2c_address', fallback='0x28'), 0)
+IMU_SAMPLE_COUNT = config.getint('imu', 'calibration_samples', fallback=100)
+IMU_CALIBRATION_INTERVAL = config.getfloat('imu', 'calibration_interval', fallback=0.01)
+IMU_SAMPLE_INTERVAL = config.getfloat('imu', 'sample_interval', fallback=0.02)
+IMU_ACCEL_DEADBAND = config.getfloat('imu', 'acceleration_deadband', fallback=0.05)
+IMU_RECONNECT_INTERVAL = config.getfloat('imu', 'reconnect_interval', fallback=2.0)
+
 # Setup GPIO
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(FORWARD_PIN, GPIO.OUT, initial=GPIO.LOW)
@@ -668,6 +678,114 @@ def serial_reader(port):
                 pass
             devices[device_id] = None
 
+def read_imu_sample(sensor):
+    """Read BNO055 Euler angles and gravity-free linear acceleration."""
+    euler = sensor.euler
+    linear_acceleration = sensor.linear_acceleration
+
+    if (euler is None or linear_acceleration is None or
+            len(euler) != 3 or len(linear_acceleration) != 3 or
+            any(value is None for value in euler + linear_acceleration)):
+        raise RuntimeError("BNO055 returned an incomplete measurement")
+
+    # CircuitPython order: heading, roll, pitch. Preserve the Arduino example's
+    # orientation.x/y/z labels exactly: yaw, pitch, roll.
+    yaw, pitch, roll = (float(value) for value in euler)
+    accel_x, accel_y, accel_z = (float(value) for value in linear_acceleration)
+    return yaw, pitch, roll, accel_x, accel_y, accel_z
+
+def imu_reader():
+    """Send Raspberry Pi BNO055 data to the TCP backend as device 5."""
+    while True:
+        try:
+            # Load hardware-specific packages only when the IMU is enabled so
+            # the existing device 1-4 flow does not depend on them.
+            import board
+            import adafruit_bno055
+
+            i2c = board.I2C()
+            sensor = adafruit_bno055.BNO055_I2C(i2c, address=IMU_I2C_ADDRESS)
+            sensor.mode = adafruit_bno055.IMUPLUS_MODE
+            sensor.external_crystal = True
+
+            logger.info(
+                "BNO055 connected at I2C 0x%02X for backend device %s; keep vehicle still",
+                IMU_I2C_ADDRESS,
+                IMU_DEVICE_ID,
+            )
+            time.sleep(2.0)
+
+            offset_sums = [0.0] * 6
+            collected_samples = 0
+            while collected_samples < IMU_SAMPLE_COUNT:
+                try:
+                    sample = read_imu_sample(sensor)
+                except RuntimeError:
+                    time.sleep(IMU_CALIBRATION_INTERVAL)
+                    continue
+
+                offset_sums = [
+                    total + value for total, value in zip(offset_sums, sample)
+                ]
+                collected_samples += 1
+                time.sleep(IMU_CALIBRATION_INTERVAL)
+
+            offsets = [total / IMU_SAMPLE_COUNT for total in offset_sums]
+            velocity = [0.0, 0.0, 0.0]
+            previous_time = time.monotonic()
+            logger.info("BNO055 zero calibration completed for device %s", IMU_DEVICE_ID)
+
+            while True:
+                loop_started = time.monotonic()
+                yaw, pitch, roll, accel_x, accel_y, accel_z = read_imu_sample(sensor)
+                dt = loop_started - previous_time
+                previous_time = loop_started
+
+                real_yaw = yaw - offsets[0]
+                real_pitch = pitch - offsets[1]
+                real_roll = roll - offsets[2]
+
+                if real_yaw > 180.0:
+                    real_yaw -= 360.0
+                if real_yaw < -180.0:
+                    real_yaw += 360.0
+
+                acceleration = [
+                    accel_x - offsets[3],
+                    accel_y - offsets[4],
+                    accel_z - offsets[5],
+                ]
+                acceleration = [
+                    0.0 if abs(value) < IMU_ACCEL_DEADBAND else value
+                    for value in acceleration
+                ]
+
+                velocity = [
+                    current_velocity + current_acceleration * dt
+                    for current_velocity, current_acceleration
+                    in zip(velocity, acceleration)
+                ]
+
+                message = (
+                    f"{IMU_DEVICE_ID}|PX:{real_pitch:.2f},RX:{real_roll:.2f},YX:{real_yaw:.2f},"
+                    f"AY:{acceleration[1]:.2f},AZ:{acceleration[2]:.2f},"
+                    f"SY:{velocity[1]:.2f},SZ:{velocity[2]:.2f}\n"
+                )
+                tcp_send_data(message)
+
+                remaining_time = IMU_SAMPLE_INTERVAL - (time.monotonic() - loop_started)
+                if remaining_time > 0:
+                    time.sleep(remaining_time)
+
+        except Exception as e:
+            logger.error(
+                "Device %s BNO055 error: %s; retrying in %.1f seconds",
+                IMU_DEVICE_ID,
+                e,
+                IMU_RECONNECT_INTERVAL,
+            )
+            time.sleep(IMU_RECONNECT_INTERVAL)
+
 # MAIN THREADS
 
 if __name__ == "__main__":
@@ -696,6 +814,11 @@ if __name__ == "__main__":
     # Seri port okuyucuları başlat
     for port in serial_nodes.keys():
         threading.Thread(target=serial_reader, args=(port,), daemon=True).start()
+
+    # Start BNO055 device 5 without affecting the existing serial devices.
+    if IMU_ENABLED:
+        threading.Thread(target=imu_reader, daemon=True).start()
+        logger.info("BNO055 backend device %s reader started", IMU_DEVICE_ID)
 
     logger.info("=" * 60)
     logger.info("System is running. Waiting for commands...")
